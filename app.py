@@ -49,7 +49,7 @@ if page == "Fine-tuning":
         uploaded_files = st.file_uploader(
             "Upload training data files",
             accept_multiple_files=True,
-            type=["txt", "csv", "json", "jsonl"]
+            type=["txt", "csv", "json", "jsonl", "md", "yaml", "yml", "pdf"]
         )
         
         if uploaded_files:

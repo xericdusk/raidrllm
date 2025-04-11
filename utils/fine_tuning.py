@@ -2,6 +2,8 @@ import os
 import json
 import tempfile
 import streamlit as st
+import requests
+import io
 from typing import List, Dict, Any, Optional
 from datasets import Dataset
 from transformers import (
@@ -38,6 +40,113 @@ def upload_training_data(uploaded_files):
     ]
     
     return st.session_state["uploaded_file_paths"]
+
+def process_url_for_training(urls: List[str]) -> List[str]:
+    """
+    Download and process content from URLs for training data.
+    
+    Args:
+        urls: List of URLs to download content from
+        
+    Returns:
+        List of file paths where the downloaded content is saved
+    """
+    if "temp_dir" not in st.session_state:
+        st.session_state["temp_dir"] = tempfile.mkdtemp()
+    
+    temp_dir = st.session_state["temp_dir"]
+    file_paths = []
+    
+    for i, url in enumerate(urls):
+        try:
+            # Download content from URL
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()  # Raise exception for HTTP errors
+            
+            content = response.text
+            
+            # Determine file type based on content or headers
+            content_type = response.headers.get('Content-Type', '')
+            
+            if 'json' in content_type:
+                file_ext = '.json'
+                # Try to parse as JSON to validate
+                try:
+                    json.loads(content)
+                except json.JSONDecodeError:
+                    # If not valid JSON, try JSONL format
+                    try:
+                        for line in content.splitlines():
+                            if line.strip():
+                                json.loads(line)
+                        file_ext = '.jsonl'
+                    except json.JSONDecodeError:
+                        file_ext = '.txt'  # Default to text if parsing fails
+            elif 'csv' in content_type:
+                file_ext = '.csv'
+            elif 'pdf' in content_type or url.lower().endswith('.pdf'):
+                file_ext = '.pdf'
+                # For PDFs, we need to save the binary content, not the text
+                content = response.content
+                # Use binary mode for writing
+                binary_mode = True
+            else:
+                file_ext = '.txt'  # Default to text
+                binary_mode = False
+            
+            # Generate a filename based on the URL
+            filename = f"url_content_{i}{file_ext}"
+            file_path = os.path.join(temp_dir, filename)
+            
+            # Save content to file - use binary mode for PDFs
+            if 'binary_mode' in locals() and binary_mode:
+                with open(file_path, 'wb') as f:
+                    f.write(content)
+            else:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+            
+            file_paths.append(file_path)
+            
+        except Exception as e:
+            st.error(f"Error processing URL {url}: {str(e)}")
+    
+    # Add the new file paths to the existing ones
+    if "uploaded_file_paths" not in st.session_state:
+        st.session_state["uploaded_file_paths"] = []
+    
+    st.session_state["uploaded_file_paths"].extend(file_paths)
+    
+    return file_paths
+
+def process_pdf_for_training(file_path: str) -> str:
+    """
+    Extract text from a PDF file and format it for training.
+    
+    Args:
+        file_path: Path to the PDF file
+        
+    Returns:
+        Extracted text from the PDF
+    """
+    try:
+        from PyPDF2 import PdfReader
+        
+        # Read the PDF file
+        with open(file_path, "rb") as f:
+            pdf = PdfReader(f)
+            text = ""
+            
+            # Extract text from each page
+            for page_num in range(len(pdf.pages)):
+                page = pdf.pages[page_num]
+                text += page.extract_text() + "\n\n"
+            
+            return text.strip()
+    
+    except Exception as e:
+        st.error(f"Error processing PDF {os.path.basename(file_path)}: {str(e)}")
+        return ""
 
 def format_training_data(format_type: str) -> Optional[str]:
     """
@@ -80,6 +189,144 @@ def format_training_data(format_type: str) -> Optional[str]:
                     reader = csv.DictReader(f)
                     for row in reader:
                         formatted_data.append(format_item(row, format_type))
+            
+            elif file_ext == ".yaml" or file_ext == ".yml":
+                import yaml
+                with open(file_path, "r") as f:
+                    data = yaml.safe_load(f)
+                    if isinstance(data, list):
+                        for item in data:
+                            formatted_data.append(format_item(item, format_type))
+                    else:
+                        formatted_data.append(format_item(data, format_type))
+            
+            elif file_ext == ".pdf":
+                # Process PDF file
+                text = process_pdf_for_training(file_path)
+                if text:
+                    # Attempt to structure the PDF content based on the format type
+                    if format_type == "Instruction-Response":
+                        # Try to split the text into sections that might represent instruction/response pairs
+                        sections = [s.strip() for s in text.split('\n\n') if s.strip()]
+                        
+                        # If we have at least two sections, treat them as instruction/response pairs
+                        if len(sections) >= 2:
+                            for i in range(0, len(sections) - 1, 2):
+                                if i + 1 < len(sections):
+                                    formatted_data.append({
+                                        "instruction": sections[i],
+                                        "response": sections[i + 1]
+                                    })
+                        else:
+                            # If we can't split into pairs, treat the whole text as a single item
+                            formatted_data.append({"text": text})
+                    
+                    elif format_type == "Chat":
+                        # Try to identify conversation patterns in the text
+                        lines = text.split('\n')
+                        conversation = []
+                        current_role = None
+                        current_content = []
+                        
+                        for line in lines:
+                            line = line.strip()
+                            if not line:
+                                continue
+                                
+                            # Check if line starts with a role identifier
+                            if line.lower().startswith(('user:', 'human:', 'question:')):
+                                # If we were building a previous message, add it
+                                if current_role and current_content:
+                                    conversation.append({
+                                        "role": current_role,
+                                        "content": '\n'.join(current_content).strip()
+                                    })
+                                    current_content = []
+                                
+                                current_role = "user"
+                                current_content.append(line.split(':', 1)[1].strip())
+                            
+                            elif line.lower().startswith(('assistant:', 'ai:', 'answer:', 'response:')):
+                                # If we were building a previous message, add it
+                                if current_role and current_content:
+                                    conversation.append({
+                                        "role": current_role,
+                                        "content": '\n'.join(current_content).strip()
+                                    })
+                                    current_content = []
+                                
+                                current_role = "assistant"
+                                current_content.append(line.split(':', 1)[1].strip())
+                            
+                            else:
+                                # Continue with the current role
+                                if current_role:
+                                    current_content.append(line)
+                                else:
+                                    # If no role has been identified yet, assume it's user
+                                    current_role = "user"
+                                    current_content.append(line)
+                        
+                        # Add the last message if there is one
+                        if current_role and current_content:
+                            conversation.append({
+                                "role": current_role,
+                                "content": '\n'.join(current_content).strip()
+                            })
+                        
+                        # If we have a conversation with at least one exchange, add it
+                        if len(conversation) >= 2:
+                            formatted_data.append({"messages": conversation})
+                        else:
+                            # If we couldn't identify a conversation, treat as completion
+                            formatted_data.append({"text": text})
+                    
+                    else:  # Completion
+                        formatted_data.append({"text": text})
+            
+            elif file_ext == ".md":
+                with open(file_path, "r") as f:
+                    content = f.read()
+                    # Process markdown - extract code blocks or sections
+                    import re
+                    # Find code blocks (```...```)
+                    code_blocks = re.findall(r'```(?:\w+)?\n(.*?)```', content, re.DOTALL)
+                    if code_blocks:
+                        for block in code_blocks:
+                            if format_type == "Completion":
+                                formatted_data.append({"text": block.strip()})
+                            else:
+                                # Try to determine if it's a conversation or instruction
+                                if ":" in block and ("user" in block.lower() or "assistant" in block.lower()):
+                                    # Likely a conversation
+                                    messages = []
+                                    for line in block.split('\n'):
+                                        if line.strip():
+                                            if line.lower().startswith("user:"):
+                                                messages.append({
+                                                    "role": "user",
+                                                    "content": line[5:].strip()
+                                                })
+                                            elif line.lower().startswith("assistant:"):
+                                                messages.append({
+                                                    "role": "assistant",
+                                                    "content": line[10:].strip()
+                                                })
+                                    if messages:
+                                        formatted_data.append({"messages": messages})
+                                else:
+                                    # Treat as instruction-response
+                                    parts = block.split('\n\n', 1)
+                                    if len(parts) > 1:
+                                        formatted_data.append({
+                                            "instruction": parts[0].strip(),
+                                            "response": parts[1].strip()
+                                        })
+                                    else:
+                                        formatted_data.append({"text": block.strip()})
+                    else:
+                        # Process as regular text
+                        formatted_data.append({"text": content.strip()})
             
             elif file_ext == ".txt":
                 with open(file_path, "r") as f:
@@ -218,6 +465,25 @@ def format_item(item: Dict[str, Any], format_type: str) -> Dict[str, Any]:
     
     # If we couldn't format properly, return the item as is
     return item
+
+def process_url(url: str) -> str:
+    """
+    Process a URL and return the content.
+    
+    Args:
+        url: URL to process
+        
+    Returns:
+        Content of the URL
+    """
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.text
+    
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error processing URL: {str(e)}")
+        return None
 
 def start_fine_tuning(config: Dict[str, Any]):
     """
