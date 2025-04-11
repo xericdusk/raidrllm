@@ -485,6 +485,64 @@ def process_url(url: str) -> str:
         st.error(f"Error processing URL: {str(e)}")
         return None
 
+def test_fine_tuned_model(prompt: str, model_path: str) -> str:
+    """
+    Test a fine-tuned model with a given prompt.
+    
+    Args:
+        prompt: The input prompt to test with
+        model_path: Path to the fine-tuned model
+        
+    Returns:
+        Generated text from the model
+    """
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+        from peft import PeftModel, PeftConfig
+        
+        # Create a progress placeholder
+        progress_placeholder = st.empty()
+        progress_placeholder.info("Loading fine-tuned model...")
+        
+        # Load the base model first
+        config = PeftConfig.from_pretrained(model_path)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            config.base_model_name_or_path,
+            load_in_8bit=True,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+        
+        # Load the fine-tuned model
+        model = PeftModel.from_pretrained(base_model, model_path)
+        tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
+        
+        # Set up the generation pipeline
+        pipe = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            max_length=512,
+            temperature=0.7,
+            top_p=0.95,
+            repetition_penalty=1.15
+        )
+        
+        progress_placeholder.info("Generating response...")
+        
+        # Generate text based on the prompt
+        result = pipe(prompt)[0]["generated_text"]
+        
+        # Clear the progress placeholder
+        progress_placeholder.empty()
+        
+        return result
+    
+    except Exception as e:
+        st.error(f"Error testing fine-tuned model: {str(e)}")
+        return ""
+
 def start_fine_tuning(config: Dict[str, Any]):
     """
     Start the fine-tuning process with the given configuration.
@@ -591,10 +649,14 @@ def start_fine_tuning(config: Dict[str, Any]):
             trainer.train()
             
             # Save the model
-            update_progress("Saving fine-tuned model...")
-            trainer.save_model(output_dir)
+            output_dir = f"./fine_tuned_model_{int(time.time())}"
+            model.save_pretrained(output_dir)
+            tokenizer.save_pretrained(output_dir)
             
-            update_progress("Fine-tuning completed successfully!")
+            # Save the model path in session state for easy access in testing
+            st.session_state["fine_tuned_model_path"] = output_dir
+            
+            update_progress(f"Fine-tuning completed! Model saved to {output_dir}")
         
         except Exception as e:
             update_progress(f"Error during fine-tuning: {str(e)}")

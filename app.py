@@ -40,7 +40,7 @@ if page == "Fine-tuning":
     st.title("Mistral 8b Fine-tuning")
     
     # Create tabs for different fine-tuning steps
-    tab1, tab2, tab3 = st.tabs(["Upload Data", "Format Data", "Start Fine-tuning"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Upload Data", "Format Data", "Start Fine-tuning", "Test Model"])
     
     with tab1:
         st.header("Upload Training Data")
@@ -107,6 +107,70 @@ if page == "Fine-tuning":
             
             start_fine_tuning(fine_tuning_config)
             st.success("Fine-tuning process started!")
+    
+    with tab4:
+        st.header("Test Fine-tuned Model")
+        st.write("Test your fine-tuned model with custom prompts.")
+        
+        # Input for model path
+        default_model_path = st.session_state.get("fine_tuned_model_path", "")
+        model_path = st.text_input(
+            "Path to fine-tuned model",
+            value=default_model_path,
+            placeholder="/path/to/your/fine-tuned-model",
+            help="Enter the path to your fine-tuned model directory"
+        )
+        
+        # Test prompt input
+        test_prompt = st.text_area(
+            "Enter a test prompt",
+            height=150,
+            placeholder="Write a prompt to test your fine-tuned model..."
+        )
+        
+        # Compare with base model option
+        compare_with_base = st.checkbox("Compare with base model", value=False)
+        
+        if st.button("Generate Response") and model_path and test_prompt:
+            from utils.fine_tuning import test_fine_tuned_model
+            
+            # Test the fine-tuned model
+            with st.spinner("Generating response from fine-tuned model..."):
+                fine_tuned_response = test_fine_tuned_model(test_prompt, model_path)
+                
+                st.subheader("Fine-tuned Model Response:")
+                st.markdown(f"""```
+{fine_tuned_response}
+```""")
+                
+                # Save the response to session state for comparison
+                st.session_state["fine_tuned_response"] = fine_tuned_response
+            
+            # If compare with base model is selected
+            if compare_with_base:
+                # This would require implementing a similar function for the base model
+                st.info("Base model comparison is not implemented yet. You can manually compare the responses.")
+        
+        # Display tips for effective testing
+        with st.expander("Tips for effective testing"):
+            st.markdown("""
+            ### Testing Best Practices
+            
+            1. **Use diverse prompts** - Test with different types of inputs to see how well the model generalizes.
+            
+            2. **Compare with training data** - Try prompts similar to your training data to see if the model learned the patterns.
+            
+            3. **Evaluate objectively** - Consider factors like:
+               - Relevance to the prompt
+               - Factual accuracy
+               - Coherence and fluency
+               - Alignment with your fine-tuning objectives
+            
+            4. **Iterative improvement** - If results aren't satisfactory, consider:
+               - Adding more diverse training examples
+               - Adjusting training parameters
+               - Refining your data formatting
+            """)
 
 # RAG Collection Builder page
 elif page == "RAG Collection Builder":
